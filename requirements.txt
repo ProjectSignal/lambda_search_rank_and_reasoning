@@ -9,4 +9,4 @@ upstash-redis
 upstash-vector
 redis
 boto3
-bson
+aiofiles

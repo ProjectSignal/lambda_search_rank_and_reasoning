@@ -23,8 +23,12 @@ def get_env_var(var_name: str, required: bool = True) -> Optional[str]:
 
 
 # MongoDB Configuration
-MONGODB_URI = get_env_var("MONGODB_URI")
-DB_NAME = get_env_var("MONGODB_DB_NAME", required=False) or "brace"
+# Accept both MONGODB_URI and MONGO_URI for consistency with other modules
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
+if not MONGODB_URI:
+    raise ValueError("Required environment variable MONGODB_URI or MONGO_URI is not set")
+
+DB_NAME = get_env_var("MONGODB_DB_NAME", required=False) or os.getenv("MONGODB_DB_NAME") or "brace"
 
 # Initialize MongoDB client
 mongo_client = MongoClient(MONGODB_URI)

@@ -26,6 +26,115 @@ def get_utc_now():
     return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
 
 async def process_reasoning_request(event_data: dict) -> dict:
+
+    def adapt_hyde_response_to_rank_details(hyde_resp: dict) -> dict:
+        """
+        Adapt HyDE hydeAnalysis.response to the flattened details object
+        expected by convert_hyde_details_to_xml in ranking.py.
+
+        If the input already appears flattened (has 'locations' or 'skills' as arrays of strings),
+        return it as-is.
+        """
+        if not isinstance(hyde_resp, dict):
+            return {}
+
+        # If already flattened (heuristic)
+        if any(k in hyde_resp for k in ["locations", "skills", "organizations", "sectors", "db_queries"]):
+            return hyde_resp
+
+        details = {}
+
+        # Locations
+        loc = hyde_resp.get("locationDetails", {})
+        if isinstance(loc, dict):
+            locs = []
+            for it in loc.get("locations", []) or []:
+                if isinstance(it, dict):
+                    name = it.get("name")
+                else:
+                    name = it
+                if name:
+                    locs.append(name)
+            if locs:
+                details["locations"] = locs
+            op = loc.get("operator")
+            if op:
+                details["location_operator"] = op
+
+        # Organizations
+        org = hyde_resp.get("organisationDetails", {}) or hyde_resp.get("organizationDetails", {})
+        if isinstance(org, dict):
+            orgs = []
+            for it in org.get("organizations", []) or []:
+                if isinstance(it, dict):
+                    name = it.get("name")
+                else:
+                    name = it
+                if name:
+                    orgs.append(name)
+            if orgs:
+                details["organizations"] = orgs
+            op = org.get("operator")
+            if op:
+                details["organization_operator"] = op
+            temporal = org.get("temporal")
+            if temporal:
+                details["organization_temporal"] = temporal
+
+        # Sectors
+        sec = hyde_resp.get("sectorDetails", {})
+        if isinstance(sec, dict):
+            secs = []
+            for it in sec.get("sectors", []) or []:
+                if isinstance(it, dict):
+                    name = it.get("name")
+                else:
+                    name = it
+                if name:
+                    secs.append(name)
+            if secs:
+                details["sectors"] = secs
+            op = sec.get("operator")
+            if op:
+                details["sector_operator"] = op
+            temporal = sec.get("temporal")
+            if temporal:
+                details["sector_temporal"] = temporal
+
+        # Skills
+        skl = hyde_resp.get("skillDetails", {})
+        if isinstance(skl, dict):
+            skills = []
+            for it in skl.get("skills", []) or []:
+                if isinstance(it, dict):
+                    name = it.get("name")
+                else:
+                    name = it
+                if name:
+                    skills.append(name)
+            if skills:
+                details["skills"] = skills
+            op = skl.get("operator")
+            if op:
+                details["skill_operator"] = op
+
+        # Database Queries
+        dbq = hyde_resp.get("dbQueryDetails", {})
+        if isinstance(dbq, dict):
+            queries = []
+            for q in dbq.get("queries", []) or []:
+                if isinstance(q, dict):
+                    fld = q.get("field", "")
+                    desc = q.get("description", "") or ""
+                    if fld:
+                        queries.append({"field": fld, "description": desc})
+            if queries:
+                details["db_queries"] = queries
+            op = dbq.get("operator")
+            if op:
+                details["db_query_operator"] = op
+
+        return details
     """
     Process reasoning request for search results from searchOutput collection
 
@@ -85,6 +194,8 @@ async def process_reasoning_request(event_data: dict) -> dict:
             query = search_doc.get("query", "")
             results_data = search_doc.get("results", {})
             hyde_analysis = search_doc.get("hydeAnalysis", {}).get("response", {})
+            # Adapt HyDE response to flattened details for ranking XML prompt
+            hyde_details_for_rank = adapt_hyde_response_to_rank_details(hyde_analysis)
 
             # Get model from flags or use default
             flags = search_doc.get("flags", {})
@@ -118,7 +229,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
                 ranked_results = await process_people_direct(
                     candidates,
                     query,
-                    hyde_analysis_flags=hyde_analysis,
+                    hyde_analysis_flags=hyde_details_for_rank,
                     batch_size=5,
                     max_concurrent_tasks=max_concurrent_calls,
                     reasoning_model=model
@@ -159,6 +270,8 @@ async def process_reasoning_request(event_data: dict) -> dict:
                 logger.info(f"Skipping ranking, using {len(candidates)} candidates directly")
                 nodes = [{"nodeId": c.get("personId")} for c in candidates if c.get("personId")]
             
+
+        # Legacy path removed: this service only supports searchId-based execution
 
         # Validate required data
         if not query:
@@ -312,20 +425,15 @@ async def process_reasoning_request(event_data: dict) -> dict:
 
 def lambda_handler(event, context):
     """
-    AWS Lambda handler for reasoning service
+    AWS Lambda handler for ranking and optional reasoning.
 
-    Expected event format from Step Functions:
+    Expected event format:
     {
-        "searchId": "uuid-string"  // Loads results from searchOutput collection
-    }
-    
-    OR legacy format for backward compatibility:
-    {
-        "nodes": [{"nodeId": "..."}, ...],
-        "query": "search query", 
-        "reasoning_model": "groq_llama",  // optional, defaults to groq_llama for parity
-        "hyde_analysis": {...},           // optional
-        "max_concurrent_calls": 5         // optional
+        "searchId": "uuid-string",           // required; loads candidates and hydeAnalysis from searchOutput collection
+        "ranking_enabled": true,             // optional, default true
+        "reasoning_enabled": false,          // optional, default false
+        "top_k_for_insights": 10,            // optional, default 10
+        "max_concurrent_calls": 5            // optional, default 5
     }
     """
     try:
@@ -350,66 +458,13 @@ def lambda_handler(event, context):
 
 # For local testing
 if __name__ == "__main__":
-    import uuid
-    
-    # Test new searchId-based approach
-    test_event_new = {
-        "searchId": "test-search-id-123"  # Should exist in searchOutput collection
+    # Minimal local test: expects an existing searchId in DB
+    test_event = {
+        "searchId": os.getenv("TEST_SEARCH_ID", "test-search-id-123"),
+        "ranking_enabled": True,
+        "reasoning_enabled": False,
+        "top_k_for_insights": 10
     }
-    
-    # Test legacy approach for backward compatibility
-    test_event_legacy = {
-        "nodes": [
-            {"nodeId": "67c6b85a8e64eea9d367d1d7"}
-        ],
-        "query": "graduated from harvard and working in startup",
-        "reasoning_model": "groq_llama",  # Fixed: now uses reasoning_model
-        "hyde_analysis": {
-            "regionBasedQuery": 0,
-            "locationDetails": {
-                "operator": "AND",
-                "locations": []
-            },
-            "sectorBasedQuery": 1,
-            "sectorDetails": {
-                "operator": "AND",
-                "temporal": "current",
-                "sectors": [
-                    {
-                        "name": "Startup",
-                        "keywords": ["startup", "start-up", "early stage"]
-                    }
-                ]
-            },
-            "organisationBasedQuery": 0,
-            "organisationDetails": {
-                "operator": "AND",
-                "temporal": "any",
-                "organizations": []
-            },
-            "skillBasedQuery": 0,
-            "skillDetails": {
-                "operator": "AND",
-                "skills": []
-            },
-            "dbBasedQuery": 1,
-            "dbQueryDetails": {
-                "operator": "AND",
-                "queries": [
-                    {
-                        "field": "education.school",
-                        "regex": "(?i)\\bHarvard\\b|\\bHarvard University\\b",
-                        "description": "Graduated from Harvard"
-                    }
-                ]
-            }
-        }
-    }
-
-    print("Testing new searchId-based approach:")
-    result_new = lambda_handler(test_event_new, None)
-    print(json.dumps(result_new, indent=2, default=str))
-    
-    print("\nTesting legacy approach:")
-    result_legacy = lambda_handler(test_event_legacy, None)
-    print(json.dumps(result_legacy, indent=2, default=str))
+    print("Testing searchId-based approach:")
+    res = lambda_handler(test_event, None)
+    print(json.dumps(res, indent=2, default=str))
