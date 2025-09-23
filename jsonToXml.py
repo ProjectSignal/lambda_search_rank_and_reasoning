@@ -38,8 +38,6 @@ def json_to_xml(node_data: Dict[str, Any]) -> str:
         ET.SubElement(root, "about").text = sanitize_text(node_data["about"])
     if node_data.get("currentLocation"):
         ET.SubElement(root, "currentLocation").text = sanitize_text(node_data["currentLocation"])
-    # if node_data.get("avatarURL"):
-    #     ET.SubElement(root, "avatarURL").text = sanitize_text(node_data["avatarURL"]) # Assuming URL is safe
     # if node_data.get("backgroundImage"):
     #      ET.SubElement(root, "backgroundImage").text = sanitize_text(node_data["backgroundImage"]) # Assuming URL is safe
 

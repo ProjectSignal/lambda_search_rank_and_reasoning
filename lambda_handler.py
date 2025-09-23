@@ -142,9 +142,6 @@ async def process_reasoning_request(event_data: dict) -> dict:
                         "matchedOrgOnly": original_candidate.get("matchedOrgOnly", False) if original_candidate else False,
                         "matchedSkillOnly": original_candidate.get("matchedSkillOnly", False) if original_candidate else False
                     }
-                    # Add avatar URL if present and reasonable size
-                    if original_candidate and original_candidate.get("avatarUrl") and len(str(original_candidate.get("avatarUrl"))) < 200:
-                        minimal_result["avatarUrl"] = original_candidate["avatarUrl"]
                     minimal_results.append(minimal_result)
 
                 # Update search document with ranked results
