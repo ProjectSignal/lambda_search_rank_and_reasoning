@@ -3,13 +3,16 @@ from prompts.search_ranking import message
 import json
 import xml.etree.ElementTree as ET
 import re
-from typing import List, Dict, Tuple, Optional
+from typing import Any, List, Dict, Tuple, Optional
 import asyncio
 import aiofiles
 import time
 from datetime import datetime
 import math
 import os
+from bson.objectid import ObjectId
+
+from db import nodes_collection
 from llm_helper import LLMManager
 from model_config import MODEL_CONFIGS
 import traceback
@@ -18,6 +21,240 @@ logger = setup_logger(__name__)
 # import logging
 # logger = setup_logger(__name__)
 # logger = logging.getLogger(__name__)
+
+
+def convert_objectids_to_strings(obj):
+    """Recursively convert any ObjectId instances into strings."""
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {key: convert_objectids_to_strings(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [convert_objectids_to_strings(item) for item in obj]
+    return obj
+
+
+def process_mutuals(mutual_ids):
+    """Fetch mutual connection metadata for the provided identifiers."""
+    if not mutual_ids:
+        return []
+
+    object_ids = []
+    for mid in mutual_ids:
+        if isinstance(mid, ObjectId):
+            object_ids.append(mid)
+        elif isinstance(mid, dict) and "$oid" in mid:
+            try:
+                object_ids.append(ObjectId(mid["$oid"]))
+            except Exception:
+                continue
+        elif mid:
+            try:
+                object_ids.append(ObjectId(str(mid)))
+            except Exception:
+                continue
+
+    if not object_ids:
+        return []
+
+    mutual_docs = list(
+        nodes_collection.find(
+            {"_id": {"$in": object_ids}},
+            {"_id": 1, "name": 1, "avatarURL": 1}
+        )
+    )
+
+    return [
+        {
+            "personId": str(doc["_id"]),
+            "name": doc.get("name", ""),
+            "avatarURL": doc.get("avatarURL", "")
+        }
+        for doc in mutual_docs
+    ]
+
+
+def analyze_hyde_data_requirements(hyde_result: dict) -> dict:
+    """Determine which additional Mongo fields are needed for ranking."""
+    required_fields = set()
+    db_queries = []
+
+    if not hyde_result:
+        return {"additional_fields": [], "db_queries": []}
+
+    hyde_response = hyde_result.get("response", hyde_result)
+
+    if hyde_response.get("dbBasedQuery", False):
+        db_details = hyde_response.get("dbQueryDetails", {})
+        for query in db_details.get("queries", []):
+            field = query.get("field")
+            if not field:
+                continue
+            db_queries.append(query)
+            if field.startswith("education."):
+                required_fields.add("education")
+            elif field.startswith("accomplishments."):
+                required_fields.add("accomplishments")
+            elif field.startswith("workExperience.") and not field.startswith("workExperience.0."):
+                required_fields.add("workExperience")
+            elif field.startswith("certifications."):
+                required_fields.add("accomplishments")
+
+    return {
+        "additional_fields": list(required_fields),
+        "db_queries": db_queries
+    }
+
+
+def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict[str, Any]:
+    """Fetch Mongo documents and prepare data needed for ranking and output."""
+    hyde_requirements = analyze_hyde_data_requirements(hyde_result)
+    additional_fields = hyde_requirements.get("additional_fields", [])
+
+    person_object_ids = []
+    person_id_lookup = {}
+    for cand in candidates:
+        pid = cand.get("personId")
+        if not pid:
+            continue
+        try:
+            oid = ObjectId(pid)
+        except Exception:
+            logger.warning(f"Unable to convert personId {pid} to ObjectId for enrichment")
+            continue
+        person_object_ids.append(oid)
+        person_id_lookup[pid] = cand
+
+    if not person_object_ids:
+        return {
+            "enriched_list": [],
+            "enriched_map": {},
+            "transformed_map": {},
+            "missing_ids": [],
+            "hyde_requirements": hyde_requirements
+        }
+
+    base_projection = {
+        "_id": 1,
+        "about": 1,
+        "name": 1,
+        "currentLocation": 1,
+        "workExperience": 1,
+        "scrapped": 1,
+        "connectionLevel": 1,
+        "linkedinUsername": 1,
+        "linkedinHeadline": 1,
+        "contacts": 1,
+        "avatarURL": 1,
+        "mutual": 1,
+        "stage": 1,
+        "education": 1,
+        "accomplishments": 1,
+        "volunteering": 1
+    }
+
+    for field in additional_fields:
+        base_projection[field] = 1
+
+    mongo_docs = {
+        str(doc["_id"]): doc
+        for doc in nodes_collection.find(
+            {"_id": {"$in": person_object_ids}},
+            base_projection
+        )
+    }
+
+    enriched_list: List[Dict] = []
+    enriched_map: Dict[str, Dict] = {}
+    transformed_map: Dict[str, Dict] = {}
+    missing_ids: List[str] = []
+
+    for candidate in candidates:
+        pid = candidate.get("personId")
+        if not pid:
+            continue
+
+        doc = mongo_docs.get(pid)
+        if not doc or not doc.get("scrapped"):
+            missing_ids.append(pid)
+            continue
+
+        doc_clean = convert_objectids_to_strings(doc)
+        candidate_copy = convert_objectids_to_strings(candidate.copy())
+        for obsolete_flag in ("matchedBoth", "matchedOrgOnly", "matchedSkillOnly", "matchedSectorOnly"):
+            candidate_copy.pop(obsolete_flag, None)
+
+        work_experience = doc_clean.get("workExperience", []) or []
+        if work_experience:
+            first_exp = work_experience[0]
+            current_work = {
+                "companyName": first_exp.get("companyName", ""),
+                "duration": first_exp.get("duration", ""),
+                "description": first_exp.get("description", ""),
+                "location": first_exp.get("location", ""),
+                "title": first_exp.get("title", "")
+            }
+        else:
+            current_work = {
+                "companyName": "",
+                "duration": "",
+                "description": "",
+                "location": "",
+                "title": ""
+            }
+
+        mutuals_raw = doc.get("mutual") or doc.get("contacts", {}).get("mutuals", [])
+        mutuals = process_mutuals(mutuals_raw)
+
+        transformed_person = {
+            "personId": pid,
+            "userId": candidate_copy.get("userId", ""),
+            "name": doc_clean.get("name", ""),
+            "aboutMe": doc_clean.get("about", ""),
+            "currentLocation": doc_clean.get("currentLocation", ""),
+            "avatarURL": doc_clean.get("avatarURL", ""),
+            "mutuals": mutuals,
+            "linkedinHeadline": doc_clean.get("linkedinHeadline", ""),
+            "education": doc_clean.get("education", []),
+            "accomplishments": doc_clean.get("accomplishments", {}),
+            "volunteering": doc_clean.get("volunteering", []),
+            "workExperience": work_experience,
+            "currentWork": current_work
+        }
+
+        transformed_map[pid] = transformed_person
+
+        enriched_entry = {
+            **candidate_copy,
+            "personId": pid,
+            "type": "person",
+            "name": doc_clean.get("name", ""),
+            "stage": doc_clean.get("stage", ""),
+            "currentLocation": doc_clean.get("currentLocation", ""),
+            "connectionLevel": doc_clean.get("connectionLevel", ""),
+            "linkedinUsername": doc_clean.get("linkedinUsername", ""),
+            "linkedinHeadline": doc_clean.get("linkedinHeadline", ""),
+            "contacts": doc_clean.get("contacts", {}),
+            "currentWork": current_work,
+            "avatarURL": doc_clean.get("avatarURL", ""),
+            "mutuals": mutuals,
+            "score": None
+        }
+
+        enriched_entry = convert_objectids_to_strings(enriched_entry)
+        enriched_list.append(enriched_entry)
+        enriched_map[pid] = enriched_entry
+
+    if missing_ids:
+        logger.warning(f"Missing or unsuited Mongo documents for {len(missing_ids)} candidates: {missing_ids[:5]}{'...' if len(missing_ids) > 5 else ''}")
+
+    return {
+        "enriched_list": enriched_list,
+        "enriched_map": enriched_map,
+        "transformed_map": transformed_map,
+        "missing_ids": missing_ids,
+        "hyde_requirements": hyde_requirements
+    }
 
 
 class FingerprintMapper:

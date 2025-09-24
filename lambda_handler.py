@@ -3,10 +3,12 @@ import asyncio
 import os
 import traceback
 from datetime import datetime, timezone
+from typing import Dict, List
 from dotenv import load_dotenv
 from reasoning_logic import SearchReasoning
 from logging_config import setup_logger
-from db import nodes_collection, searchOutputCollection
+from db import searchOutputCollection
+from ranking import build_candidate_materials, process_people_direct, convert_objectids_to_strings
 
 # Load environment variables (for local testing)
 load_dotenv()
@@ -202,10 +204,6 @@ async def process_reasoning_request(event_data: dict) -> dict:
             model = flags.get('reasoning_model', flags.get('model', 'groq_llama'))
             max_concurrent_calls = event_data.get('max_concurrent_calls', 5)
 
-            # Initialize variables
-            ranked_results = []
-            nodes = []
-
             # Get candidates from search results
             candidates = results_data.get("candidates", [])
             if not candidates:
@@ -218,57 +216,131 @@ async def process_reasoning_request(event_data: dict) -> dict:
 
             logger.info(f"Found {len(candidates)} candidates for processing")
 
-            # Always perform ranking when ranking_enabled (default True)
-            if ranking_enabled:
-                logger.info(f"Performing ranking on {len(candidates)} candidates...")
+            materials = build_candidate_materials(candidates, search_doc.get("hydeAnalysis", {}))
+            enriched_candidates = materials["enriched_list"]
+            enriched_map = materials["enriched_map"]
+            transformed_map = materials["transformed_map"]
 
-                # Import ranking function
-                from ranking import process_people_direct
-
-                # Perform ranking
-                ranked_results = await process_people_direct(
-                    candidates,
-                    query,
-                    hyde_analysis_flags=hyde_details_for_rank,
-                    batch_size=5,
-                    max_concurrent_tasks=max_concurrent_calls,
-                    reasoning_model=model
-                )
-
-                logger.info(f"Ranking completed: {len(ranked_results)} results")
-
-                # Store minimal ranked results in database
-                minimal_results = []
-                for r in ranked_results:
-                    # Find the original candidate data to preserve search metadata
-                    person_id = r.get("personId")
-                    original_candidate = next((c for c in candidates if c.get("personId") == person_id), None)
-
-                    minimal_result = {
-                        "nodeId": person_id,
-                        "score": r.get("recommendationScore", 0),
-                        # Preserve original search metadata from candidates
-                        "similarity": original_candidate.get("similarity", 0) if original_candidate else 0,
-                        "matchedBoth": original_candidate.get("matchedBoth", False) if original_candidate else False,
-                        "matchedOrgOnly": original_candidate.get("matchedOrgOnly", False) if original_candidate else False,
-                        "matchedSkillOnly": original_candidate.get("matchedSkillOnly", False) if original_candidate else False
-                    }
-                    minimal_results.append(minimal_result)
-
-                # Update search document with ranked results
+            if not enriched_candidates:
+                logger.warning("No enriched candidates available after Mongo fetch; persisting original candidate list")
                 searchOutputCollection.update_one(
                     {"_id": search_id},
                     {"$set": {
-                        "results.ranked": minimal_results
+                        "results.ranked": [],
+                        "results.candidates": candidates
+                    }}
+                )
+                nodes = [{"nodeId": c.get("personId")} for c in candidates if c.get("personId")]
+            else:
+                similarity_sorted = sorted(
+                    enriched_candidates,
+                    key=lambda c: c.get("similarity", 0),
+                    reverse=True
+                )
+
+                minimal_results: List[Dict] = []
+                final_candidates: List[Dict] = []
+
+                if ranking_enabled:
+                    DEFAULT_TOP_N = 150
+                    rank_top_n = event_data.get('rank_top_n')
+                    if rank_top_n is None:
+                        try:
+                            rank_top_n = int(os.getenv('RANK_TOP_N', DEFAULT_TOP_N))
+                        except Exception:
+                            rank_top_n = DEFAULT_TOP_N
+
+                    rank_ids = [
+                        entry["personId"]
+                        for entry in similarity_sorted[:rank_top_n]
+                        if entry.get("personId") in transformed_map
+                    ]
+                    rank_people = [transformed_map[pid] for pid in rank_ids]
+                    logger.info(
+                        f"Ranking {len(rank_people)} candidates (requested top {rank_top_n}, available {len(similarity_sorted)})"
+                    )
+
+                    ranked_results = []
+                    if rank_people:
+                        ranked_results = await process_people_direct(
+                            rank_people,
+                            query,
+                            hyde_analysis_flags=hyde_details_for_rank,
+                            batch_size=5,
+                            max_concurrent_tasks=max_concurrent_calls,
+                            reasoning_model=model
+                        )
+                        logger.info(f"Ranking completed: {len(ranked_results)} scored profiles")
+
+                    score_threshold = float(os.getenv("RANK_SCORE_THRESHOLD", "6.5"))
+                    filtered_ranked = [
+                        r for r in ranked_results
+                        if r.get("recommendationScore", 0) >= score_threshold
+                    ]
+
+                    score_map = {}
+                    for ranked in filtered_ranked:
+                        result_copy = convert_objectids_to_strings(ranked.copy())
+                        pid = result_copy.pop("personId", None)
+                        if not pid:
+                            continue
+                        entry = enriched_map.get(pid)
+                        if not entry:
+                            continue
+                        entry.update(result_copy)
+                        entry["score"] = result_copy.get("recommendationScore")
+                        score_map[pid] = entry["score"]
+
+                    minimal_results = [
+                        {
+                            "nodeId": pid,
+                            "score": score,
+                            "similarity": enriched_map.get(pid, {}).get("similarity", 0)
+                        }
+                        for pid, score in score_map.items()
+                    ]
+                    minimal_results.sort(key=lambda r: (r.get("score", 0), r.get("similarity", 0)), reverse=True)
+                    scored_ids_ordered = [item["nodeId"] for item in minimal_results]
+
+                    tail_ids = [
+                        entry["personId"]
+                        for entry in similarity_sorted
+                        if entry.get("personId") not in scored_ids_ordered
+                    ]
+                    final_candidates = [
+                        enriched_map[pid]
+                        for pid in scored_ids_ordered
+                        if pid in enriched_map
+                    ] + [
+                        enriched_map[pid]
+                        for pid in tail_ids
+                        if pid in enriched_map
+                    ]
+
+                    logger.info(
+                        f"Final candidate distribution -> scored: {len(scored_ids_ordered)}, tail: {len(tail_ids)}"
+                    )
+                else:
+                    logger.info(f"Ranking disabled; returning candidates ordered by similarity")
+                    final_candidates = similarity_sorted
+
+                summary = results_data.get("summary", {}) or {}
+                summary.update({
+                    "count": len(final_candidates),
+                    "topK": len(minimal_results),
+                    "idsOnly": False
+                })
+
+                searchOutputCollection.update_one(
+                    {"_id": search_id},
+                    {"$set": {
+                        "results.ranked": minimal_results,
+                        "results.candidates": final_candidates,
+                        "results.summary": summary
                     }}
                 )
 
-                # Use ranked results for reasoning
-                nodes = [{"nodeId": r.get("personId")} for r in ranked_results if r.get("personId")]
-            else:
-                # No ranking, use candidates directly for reasoning
-                logger.info(f"Skipping ranking, using {len(candidates)} candidates directly")
-                nodes = [{"nodeId": c.get("personId")} for c in candidates if c.get("personId")]
+                nodes = [{"nodeId": entry.get("personId")} for entry in final_candidates if entry.get("personId")]
             
 
         # Legacy path removed: this service only supports searchId-based execution
