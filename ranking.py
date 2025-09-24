@@ -507,7 +507,7 @@ async def extract_score_data(response_text: str) -> List[Dict]:
 
 def convert_hyde_details_to_xml(details: Optional[Dict]) -> str:
     """Converts the hyde_analysis_flags dict to an XML string for the prompt."""
-    logger.info(f"Converting hyde details to XML: {details}")
+    logger.info(f"Converting hyde details to XML")
     if not details:
         return "<hyde_analysis />"  # Return empty tag if no details
 

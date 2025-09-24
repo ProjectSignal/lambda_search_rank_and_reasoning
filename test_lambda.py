@@ -61,12 +61,15 @@ def main():
     print("\n4. Validating search document update...")
     print(f"   Status: {status_str}")
 
-    ranked = (doc.get("results") or {}).get("ranked") or []
+    # UPDATED: Check candidates array instead of deprecated ranked array
+    candidates = (doc.get("results") or {}).get("candidates") or []
     if args.ranking:
-        if ranked and isinstance(ranked, list):
-            print(f"   ✅ Ranking completed with {len(ranked)} results")
+        # Count candidates that have ranking scores (indicating ranking was performed)
+        ranked_candidates = [c for c in candidates if c.get("ranked", False) or c.get("score") is not None]
+        if ranked_candidates:
+            print(f"   ✅ Ranking completed with {len(ranked_candidates)} ranked results out of {len(candidates)} candidates")
         else:
-            print("   ❌ Ranked results missing or empty")
+            print("   ❌ No ranked candidates found (ranking may have failed)")
             raise SystemExit(1)
     else:
         print("   ⚠️ Ranking disabled - skipped validation")

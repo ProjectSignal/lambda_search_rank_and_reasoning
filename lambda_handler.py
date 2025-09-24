@@ -278,66 +278,73 @@ async def process_reasoning_request(event_data: dict) -> dict:
                         if r.get("recommendationScore", 0) >= score_threshold
                     ]
 
-                    score_map = {}
+                    # OPTIMIZED: Single Progressive List Approach
+                    # Load existing candidates list (with match metadata intact)
+                    search_doc = searchOutputCollection.find_one({"_id": search_id})
+                    existing_candidates = search_doc.get("results", {}).get("candidates", [])
+                    candidates_by_id = {c["personId"]: c for c in existing_candidates}
+
+                    # Progressive enhancement - add ranking scores
+                    scored_count = 0
                     for ranked in filtered_ranked:
                         result_copy = convert_objectids_to_strings(ranked.copy())
                         pid = result_copy.pop("personId", None)
-                        if not pid:
+                        if not pid or pid not in candidates_by_id:
                             continue
-                        entry = enriched_map.get(pid)
-                        if not entry:
-                            continue
-                        entry.update(result_copy)
-                        entry["score"] = result_copy.get("recommendationScore")
-                        score_map[pid] = entry["score"]
 
-                    minimal_results = [
-                        {
-                            "nodeId": pid,
-                            "score": score,
-                            "similarity": enriched_map.get(pid, {}).get("similarity", 0)
-                        }
-                        for pid, score in score_map.items()
-                    ]
-                    minimal_results.sort(key=lambda r: (r.get("score", 0), r.get("similarity", 0)), reverse=True)
-                    scored_ids_ordered = [item["nodeId"] for item in minimal_results]
+                        # Add score to existing candidate object
+                        candidates_by_id[pid]["score"] = result_copy.get("recommendationScore", 0)
+                        candidates_by_id[pid]["ranked"] = True
+                        scored_count += 1
 
-                    tail_ids = [
-                        entry["personId"]
-                        for entry in similarity_sorted
-                        if entry.get("personId") not in scored_ids_ordered
-                    ]
-                    final_candidates = [
-                        enriched_map[pid]
-                        for pid in scored_ids_ordered
-                        if pid in enriched_map
-                    ] + [
-                        enriched_map[pid]
-                        for pid in tail_ids
-                        if pid in enriched_map
-                    ]
+                        # Add other ranking metadata if needed
+                        for key, value in result_copy.items():
+                            if key not in ["recommendationScore"]:  # Avoid duplicating renamed fields
+                                candidates_by_id[pid][key] = value
+
+                    # Sort by score (list order = ranking) - scored items first, then by similarity
+                    final_candidates = sorted(
+                        candidates_by_id.values(),
+                        key=lambda x: (
+                            x.get("score", -1),  # Scored items first (higher scores first)
+                            x.get("similarity", 0)  # Then by similarity
+                        ),
+                        reverse=True
+                    )
 
                     logger.info(
-                        f"Final candidate distribution -> scored: {len(scored_ids_ordered)}, tail: {len(tail_ids)}"
+                        f"Final candidate distribution -> scored: {scored_count}, total: {len(final_candidates)}"
                     )
                 else:
                     logger.info(f"Ranking disabled; returning candidates ordered by similarity")
-                    final_candidates = similarity_sorted
+                    # OPTIMIZED: Still use single progressive list even when ranking is disabled
+                    search_doc = searchOutputCollection.find_one({"_id": search_id})
+                    existing_candidates = search_doc.get("results", {}).get("candidates", [])
+                    final_candidates = sorted(
+                        existing_candidates,
+                        key=lambda x: x.get("similarity", 0),
+                        reverse=True
+                    )
 
                 summary = results_data.get("summary", {}) or {}
                 summary.update({
                     "count": len(final_candidates),
-                    "topK": len(minimal_results),
+                    "topK": len([c for c in final_candidates if c.get("ranked", False)]),
                     "idsOnly": False
                 })
 
+                # OPTIMIZED: Single update - replace only candidates array, remove ranked array
                 searchOutputCollection.update_one(
                     {"_id": search_id},
-                    {"$set": {
-                        "results.ranked": minimal_results,
-                        "results.candidates": final_candidates,
-                        "results.summary": summary
-                    }}
+                    {
+                        "$set": {
+                            "results.candidates": final_candidates,
+                            "results.summary": summary
+                        },
+                        "$unset": {
+                            "results.ranked": ""  # Remove deprecated ranked array
+                        }
+                    }
                 )
 
                 nodes = [{"nodeId": entry.get("personId")} for entry in final_candidates if entry.get("personId")]
@@ -392,11 +399,38 @@ async def process_reasoning_request(event_data: dict) -> dict:
 
         logger.info(f"Processing completed. Successful: {successful}, Failed: {failed}, Time: {processing_time}s")
 
+        # OPTIMIZED: Progressive enhancement - add reasoning insights to existing candidates
+        if reasoning_enabled and search_id and results:
+            # Load current candidates list (which may already have ranking scores)
+            current_search_doc = searchOutputCollection.find_one({"_id": search_id})
+            current_candidates = current_search_doc.get("results", {}).get("candidates", [])
+            candidates_by_id = {c["personId"]: c for c in current_candidates}
+
+            # Add reasoning insights to candidates in-place
+            for result in results:
+                person_id = result.get("nodeId")
+                if person_id and person_id in candidates_by_id:
+                    candidates_by_id[person_id]["reasoning"] = {
+                        "summary": result.get("summary", ""),
+                        "highlights": result.get("highlights", []),
+                        "metadata": result.get("metadata", {}),
+                        "reasoning_complete": True if 'error' not in result else False
+                    }
+                    if 'error' in result:
+                        candidates_by_id[person_id]["reasoning"]["error"] = result["error"]
+
+            # Update candidates array with reasoning data
+            updated_candidates = list(candidates_by_id.values())
+            searchOutputCollection.update_one(
+                {"_id": search_id},
+                {"$set": {"results.candidates": updated_candidates}}
+            )
+
+        # Simplified reasoning results for metadata only (no longer storing full results separately)
         reasoning_results = {
-            'results': results,
             'metadata': {
                 'total_nodes': len(nodes),
-                'reasoning_nodes_processed': len(results),
+                'reasoning_nodes_processed': len(results) if results else 0,
                 'successful_count': successful,
                 'failed_count': failed,
                 'processing_time_seconds': processing_time,
@@ -406,6 +440,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
                 'reasoning_enabled': reasoning_enabled,
                 'timestamp': get_utc_now()
             }
+            # NOTE: Full reasoning results now embedded in candidates array
         }
 
         # If using searchId approach, update the search document
@@ -425,14 +460,18 @@ async def process_reasoning_request(event_data: dict) -> dict:
                 stage_message = f"Ranking completed, {len(nodes)} results processed"
                 metrics_key = "metrics.rankingMs"
 
+            # OPTIMIZED: Only store reasoning metadata, not full results (those are now in candidates)
             update_result = searchOutputCollection.update_one(
                 {"_id": search_id},
                 {
                     "$set": {
-                        "reasoning": reasoning_results,
+                        "reasoning.metadata": reasoning_results['metadata'],  # Only metadata
                         "status": final_status,
                         metrics_key: processing_time * 1000,
                         "updatedAt": now
+                    },
+                    "$unset": {
+                        "reasoning.results": ""  # Remove full reasoning results array
                     },
                     "$push": {
                         "events": {
