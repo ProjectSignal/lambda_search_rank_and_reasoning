@@ -328,5 +328,3 @@ class SearchReasoning:
             logger.error(
                 f"Error in batch processing with model {model}: {str(e)}")
             raise
-
-
