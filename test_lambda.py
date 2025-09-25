@@ -4,7 +4,6 @@ Test script for the Reasoning Lambda function
 """
 import argparse
 import json
-import os
 from dotenv import load_dotenv
 from logging_config import setup_logger
 from lambda_handler import lambda_handler
@@ -20,22 +19,39 @@ def main():
     parser.add_argument("--no-ranking", dest="ranking", action="store_false", help="Disable ranking")
     parser.add_argument("--reasoning", dest="reasoning", action="store_true", help="Enable reasoning insights")
     parser.add_argument("--no-reasoning", dest="reasoning", action="store_false", help="Disable reasoning insights")
-    parser.add_argument("--top-k", type=int, default=10, help="Top K nodes to analyze for reasoning")
+    parser.add_argument(
+        "--candidate-ids",
+        type=str,
+        default="",
+        help="Comma separated list of candidate nodeIds to process (defaults to all)"
+    )
+    parser.add_argument(
+        "--max-concurrent-calls",
+        type=int,
+        default=5,
+        help="Override max concurrent calls to downstream models"
+    )
     parser.set_defaults(ranking=True, reasoning=False)
     args = parser.parse_args()
 
     search_id = args.search_id
+    candidate_ids = [cid.strip() for cid in args.candidate_ids.split(",") if cid.strip()]
+    candidate_filter = set(candidate_ids) if candidate_ids else None
 
     print("🚀 Starting RankAndReasoning Lambda Test")
     print(f"📌 Using searchId: {search_id}")
-    print(f"⚙️  Ranking: {args.ranking}, Reasoning: {args.reasoning}, Top-K for insights: {args.top_k}")
+    print(f"⚙️  Ranking: {args.ranking}, Reasoning: {args.reasoning}")
+    if candidate_ids:
+        print(f"🎯 Candidate subset: {candidate_ids}")
 
     event = {
         "searchId": search_id,
         "ranking_enabled": args.ranking,
         "reasoning_enabled": args.reasoning,
-        "top_k_for_insights": args.top_k
+        "max_concurrent_calls": args.max_concurrent_calls
     }
+    if candidate_ids:
+        event["candidateIds"] = candidate_ids
 
     result = lambda_handler(event, None)
     status = result.get("statusCode")
@@ -61,15 +77,22 @@ def main():
     print("\n4. Validating search document update...")
     print(f"   Status: {status_str}")
 
-    # UPDATED: Check candidates array instead of deprecated ranked array
+    # Validate candidate array produced by ranking step
     candidates = (doc.get("results") or {}).get("candidates") or []
     if args.ranking:
         # Count candidates that have ranking scores (indicating ranking was performed)
-        ranked_candidates = [c for c in candidates if c.get("ranked", False) or c.get("score") is not None]
-        if ranked_candidates:
-            print(f"   ✅ Ranking completed with {len(ranked_candidates)} ranked results out of {len(candidates)} candidates")
+        scored_candidates = [
+            c for c in candidates
+            if c.get("score") is not None
+            and (candidate_filter is None or c.get("nodeId") in candidate_filter)
+        ]
+        if scored_candidates:
+            print(
+                f"   ✅ Ranking completed with {len(scored_candidates)} scored results "
+                f"out of {len(candidate_filter) if candidate_filter else len(candidates)} candidates"
+            )
         else:
-            print("   ❌ No ranked candidates found (ranking may have failed)")
+            print("   ❌ No scores found (ranking may have failed)")
             raise SystemExit(1)
     else:
         print("   ⚠️ Ranking disabled - skipped validation")
@@ -77,7 +100,16 @@ def main():
     if args.reasoning:
         reasoning = doc.get("reasoning")
         if reasoning:
-            print("   ✅ Reasoning results present")
+            filtered = [
+                c for c in candidates
+                if c.get("reasoning")
+                and (candidate_filter is None or c.get("nodeId") in candidate_filter)
+            ]
+            if filtered:
+                print(f"   ✅ Reasoning results present for {len(filtered)} candidates")
+            else:
+                print("   ❌ Reasoning results missing")
+                raise SystemExit(1)
         else:
             print("   ❌ Reasoning results missing")
             raise SystemExit(1)

@@ -30,467 +30,405 @@ def get_utc_now():
 async def process_reasoning_request(event_data: dict) -> dict:
 
     def adapt_hyde_response_to_rank_details(hyde_resp: dict) -> dict:
-        """
-        Adapt HyDE hydeAnalysis.response to the flattened details object
-        expected by convert_hyde_details_to_xml in ranking.py.
-
-        If the input already appears flattened (has 'locations' or 'skills' as arrays of strings),
-        return it as-is.
-        """
+        """Flatten HyDE response into the structure expected by ranking prompts."""
         if not isinstance(hyde_resp, dict):
             return {}
 
-        # If already flattened (heuristic)
-        if any(k in hyde_resp for k in ["locations", "skills", "organizations", "sectors", "db_queries"]):
+        if any(key in hyde_resp for key in ("locations", "skills", "organizations", "sectors", "db_queries")):
             return hyde_resp
 
         details = {}
 
-        # Locations
         loc = hyde_resp.get("locationDetails", {})
         if isinstance(loc, dict):
-            locs = []
-            for it in loc.get("locations", []) or []:
-                if isinstance(it, dict):
-                    name = it.get("name")
+            names = []
+            for item in loc.get("locations", []) or []:
+                if isinstance(item, dict):
+                    name = item.get("name")
                 else:
-                    name = it
+                    name = item
                 if name:
-                    locs.append(name)
-            if locs:
-                details["locations"] = locs
-            op = loc.get("operator")
-            if op:
-                details["location_operator"] = op
+                    names.append(name)
+            if names:
+                details["locations"] = names
+            operator = loc.get("operator")
+            if operator:
+                details["location_operator"] = operator
 
-        # Organizations
         org = hyde_resp.get("organisationDetails", {}) or hyde_resp.get("organizationDetails", {})
         if isinstance(org, dict):
-            orgs = []
-            for it in org.get("organizations", []) or []:
-                if isinstance(it, dict):
-                    name = it.get("name")
+            names = []
+            for item in org.get("organizations", []) or []:
+                if isinstance(item, dict):
+                    name = item.get("name")
                 else:
-                    name = it
+                    name = item
                 if name:
-                    orgs.append(name)
-            if orgs:
-                details["organizations"] = orgs
-            op = org.get("operator")
-            if op:
-                details["organization_operator"] = op
+                    names.append(name)
+            if names:
+                details["organizations"] = names
+            operator = org.get("operator")
+            if operator:
+                details["organization_operator"] = operator
             temporal = org.get("temporal")
             if temporal:
                 details["organization_temporal"] = temporal
 
-        # Sectors
-        sec = hyde_resp.get("sectorDetails", {})
-        if isinstance(sec, dict):
-            secs = []
-            for it in sec.get("sectors", []) or []:
-                if isinstance(it, dict):
-                    name = it.get("name")
+        sector = hyde_resp.get("sectorDetails", {})
+        if isinstance(sector, dict):
+            names = []
+            for item in sector.get("sectors", []) or []:
+                if isinstance(item, dict):
+                    name = item.get("name")
                 else:
-                    name = it
+                    name = item
                 if name:
-                    secs.append(name)
-            if secs:
-                details["sectors"] = secs
-            op = sec.get("operator")
-            if op:
-                details["sector_operator"] = op
-            temporal = sec.get("temporal")
+                    names.append(name)
+            if names:
+                details["sectors"] = names
+            operator = sector.get("operator")
+            if operator:
+                details["sector_operator"] = operator
+            temporal = sector.get("temporal")
             if temporal:
                 details["sector_temporal"] = temporal
 
-        # Skills
-        skl = hyde_resp.get("skillDetails", {})
-        if isinstance(skl, dict):
-            skills = []
-            for it in skl.get("skills", []) or []:
-                if isinstance(it, dict):
-                    name = it.get("name")
+        skills = hyde_resp.get("skillDetails", {})
+        if isinstance(skills, dict):
+            names = []
+            for item in skills.get("skills", []) or []:
+                if isinstance(item, dict):
+                    name = item.get("name")
                 else:
-                    name = it
+                    name = item
                 if name:
-                    skills.append(name)
-            if skills:
-                details["skills"] = skills
-            op = skl.get("operator")
-            if op:
-                details["skill_operator"] = op
+                    names.append(name)
+            if names:
+                details["skills"] = names
+            operator = skills.get("operator")
+            if operator:
+                details["skill_operator"] = operator
 
-        # Database Queries
-        dbq = hyde_resp.get("dbQueryDetails", {})
-        if isinstance(dbq, dict):
+        db_queries = hyde_resp.get("dbQueryDetails", {})
+        if isinstance(db_queries, dict):
             queries = []
-            for q in dbq.get("queries", []) or []:
-                if isinstance(q, dict):
-                    fld = q.get("field", "")
-                    desc = q.get("description", "") or ""
-                    if fld:
-                        queries.append({"field": fld, "description": desc})
+            for query in db_queries.get("queries", []) or []:
+                if isinstance(query, dict):
+                    field_name = query.get("field", "")
+                    description = query.get("description", "") or ""
+                    if field_name:
+                        queries.append({"field": field_name, "description": description})
             if queries:
                 details["db_queries"] = queries
-            op = dbq.get("operator")
-            if op:
-                details["db_query_operator"] = op
+            operator = db_queries.get("operator")
+            if operator:
+                details["db_query_operator"] = operator
 
         return details
-    """
-    Process reasoning request for search results from searchOutput collection
 
-    Args:
-        event_data: Dictionary containing:
-            - searchId: Search ID to load results from searchOutput collection
-            - ranking_enabled: Whether to perform ranking (default: True)
-            - reasoning_enabled: Whether to perform reasoning analysis (default: False)
-            - top_k_for_insights: Number of top results for detailed insights (default: 10)
-            OR legacy format:
-            - nodes: List of node objects with nodeId
-            - query: Search query string
-            - reasoning_model: LLM model to use (defaults to groq_llama for parity)
-            - hyde_analysis: Hyde analysis results (optional)
-            - max_concurrent_calls: Max concurrent LLM calls (optional, defaults to 5)
-
-    Returns:
-        Dictionary with reasoning results and metadata
-    """
     start_time = datetime.utcnow()
-    search_id = None
+    search_id = event_data.get("searchId") or event_data.get("search_id") or event_data.get("search_output_id")
 
     try:
-        # Check if this is the new searchId-based approach
-        search_id = event_data.get('searchId')
+        if not search_id:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Missing searchId in request"})
+            }
 
-        # New parameters for controlling ranking and reasoning
-        ranking_enabled = event_data.get('ranking_enabled', True)
-        reasoning_enabled = event_data.get('reasoning_enabled', False)
-        top_k_for_insights = event_data.get('top_k_for_insights', 10)
-        
-        if search_id:
-            # New approach: load from searchOutput collection
-            logger.info(f"Processing reasoning for searchId: {search_id}")
-            
-            # Get search document and verify FetchAndRank is complete
-            search_doc = searchOutputCollection.find_one({"_id": search_id})
-            if not search_doc:
-                return {
-                    'statusCode': 404,
-                    'body': json.dumps({
-                        'error': f'Search document not found for searchId: {search_id}'
-                    })
-                }
+        logger.info(f"Processing rank & reasoning for searchId={search_id}")
 
-            # Verify search is complete
-            current_status = search_doc.get("status")
-            if current_status != SearchStatus.SEARCH_COMPLETE:
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps({
-                        'error': f'Search not complete for searchId: {search_id}, status: {current_status}'
-                    })
-                }
+        search_doc = searchOutputCollection.find_one({"_id": search_id})
+        if not search_doc:
+            return {
+                "statusCode": 404,
+                "body": json.dumps({"error": f"Search document not found for searchId: {search_id}"})
+            }
 
-            # Extract data from search document
-            query = search_doc.get("query", "")
-            results_data = search_doc.get("results", {})
-            hyde_analysis = search_doc.get("hydeAnalysis", {}).get("response", {})
-            # Adapt HyDE response to flattened details for ranking XML prompt
-            hyde_details_for_rank = adapt_hyde_response_to_rank_details(hyde_analysis)
-
-            # Get model from flags or use default
-            flags = search_doc.get("flags", {})
-            model = flags.get('reasoning_model', flags.get('model', 'groq_llama'))
-            max_concurrent_calls = event_data.get('max_concurrent_calls', 5)
-
-            # Get candidates from search results
-            candidates = results_data.get("candidates", [])
-            if not candidates:
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps({
-                        'error': 'No candidates found for ranking and reasoning'
-                    })
-                }
-
-            logger.info(f"Found {len(candidates)} candidates for processing")
-
-            materials = build_candidate_materials(candidates, search_doc.get("hydeAnalysis", {}))
-            enriched_candidates = materials["enriched_list"]
-            enriched_map = materials["enriched_map"]
-            transformed_map = materials["transformed_map"]
-
-            if not enriched_candidates:
-                logger.warning("No enriched candidates available after Mongo fetch; persisting original candidate list")
-                searchOutputCollection.update_one(
-                    {"_id": search_id},
-                    {"$set": {
-                        "results.ranked": [],
-                        "results.candidates": candidates
-                    }}
-                )
-                nodes = [{"nodeId": c.get("personId")} for c in candidates if c.get("personId")]
-            else:
-                similarity_sorted = sorted(
-                    enriched_candidates,
-                    key=lambda c: c.get("similarity", 0),
-                    reverse=True
-                )
-
-                minimal_results: List[Dict] = []
-                final_candidates: List[Dict] = []
-
-                if ranking_enabled:
-                    DEFAULT_TOP_N = 150
-                    rank_top_n = event_data.get('rank_top_n')
-                    if rank_top_n is None:
-                        try:
-                            rank_top_n = int(os.getenv('RANK_TOP_N', DEFAULT_TOP_N))
-                        except Exception:
-                            rank_top_n = DEFAULT_TOP_N
-
-                    rank_ids = [
-                        entry["personId"]
-                        for entry in similarity_sorted[:rank_top_n]
-                        if entry.get("personId") in transformed_map
-                    ]
-                    rank_people = [transformed_map[pid] for pid in rank_ids]
-                    logger.info(
-                        f"Ranking {len(rank_people)} candidates (requested top {rank_top_n}, available {len(similarity_sorted)})"
-                    )
-
-                    ranked_results = []
-                    if rank_people:
-                        ranked_results = await process_people_direct(
-                            rank_people,
-                            query,
-                            hyde_analysis_flags=hyde_details_for_rank,
-                            batch_size=5,
-                            max_concurrent_tasks=max_concurrent_calls,
-                            reasoning_model=model
-                        )
-                        logger.info(f"Ranking completed: {len(ranked_results)} scored profiles")
-
-                    score_threshold = float(os.getenv("RANK_SCORE_THRESHOLD", "6.5"))
-                    filtered_ranked = [
-                        r for r in ranked_results
-                        if r.get("recommendationScore", 0) >= score_threshold
-                    ]
-
-                    # OPTIMIZED: Single Progressive List Approach
-                    # Load existing candidates list (with match metadata intact)
-                    search_doc = searchOutputCollection.find_one({"_id": search_id})
-                    existing_candidates = search_doc.get("results", {}).get("candidates", [])
-                    candidates_by_id = {c["personId"]: c for c in existing_candidates}
-
-                    # Progressive enhancement - add ranking scores
-                    scored_count = 0
-                    for ranked in filtered_ranked:
-                        result_copy = convert_objectids_to_strings(ranked.copy())
-                        pid = result_copy.pop("personId", None)
-                        if not pid or pid not in candidates_by_id:
-                            continue
-
-                        # Add score to existing candidate object
-                        candidates_by_id[pid]["score"] = result_copy.get("recommendationScore", 0)
-                        candidates_by_id[pid]["ranked"] = True
-                        scored_count += 1
-
-                        # Add other ranking metadata if needed
-                        for key, value in result_copy.items():
-                            if key not in ["recommendationScore"]:  # Avoid duplicating renamed fields
-                                candidates_by_id[pid][key] = value
-
-                    # Sort by score (list order = ranking) - scored items first, then by similarity
-                    final_candidates = sorted(
-                        candidates_by_id.values(),
-                        key=lambda x: (
-                            x.get("score", -1),  # Scored items first (higher scores first)
-                            x.get("similarity", 0)  # Then by similarity
-                        ),
-                        reverse=True
-                    )
-
-                    logger.info(
-                        f"Final candidate distribution -> scored: {scored_count}, total: {len(final_candidates)}"
-                    )
-                else:
-                    logger.info(f"Ranking disabled; returning candidates ordered by similarity")
-                    # OPTIMIZED: Still use single progressive list even when ranking is disabled
-                    search_doc = searchOutputCollection.find_one({"_id": search_id})
-                    existing_candidates = search_doc.get("results", {}).get("candidates", [])
-                    final_candidates = sorted(
-                        existing_candidates,
-                        key=lambda x: x.get("similarity", 0),
-                        reverse=True
-                    )
-
-                summary = results_data.get("summary", {}) or {}
-                summary.update({
-                    "count": len(final_candidates),
-                    "topK": len([c for c in final_candidates if c.get("ranked", False)]),
-                    "idsOnly": False
-                })
-
-                # OPTIMIZED: Single update - replace only candidates array, remove ranked array
-                searchOutputCollection.update_one(
-                    {"_id": search_id},
-                    {
-                        "$set": {
-                            "results.candidates": final_candidates,
-                            "results.summary": summary
-                        },
-                        "$unset": {
-                            "results.ranked": ""  # Remove deprecated ranked array
-                        }
-                    }
-                )
-
-                nodes = [{"nodeId": entry.get("personId")} for entry in final_candidates if entry.get("personId")]
-            
-
-        # Legacy path removed: this service only supports searchId-based execution
-
-        # Validate required data
+        query = search_doc.get("query", "")
         if not query:
             return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'No query provided'
+                "statusCode": 400,
+                "body": json.dumps({"error": "Search document missing query text"})
+            }
+
+        flags = search_doc.get("flags", {}) or {}
+        ranking_enabled = event_data.get("ranking_enabled")
+        if ranking_enabled is None:
+            ranking_enabled = True
+        reasoning_enabled = event_data.get("reasoning_enabled")
+        if reasoning_enabled is None:
+            reasoning_enabled = bool(flags.get("reasoning", True))
+
+        model = (
+            event_data.get("reasoning_model")
+            or flags.get("reasoning_model")
+            or flags.get("model")
+            or "groq_llama"
+        )
+
+        max_concurrent_calls_value = event_data.get("max_concurrent_calls", 5)
+        try:
+            max_concurrent_calls = int(max_concurrent_calls_value)
+        except (TypeError, ValueError):
+            max_concurrent_calls = 5
+
+        results_data = search_doc.get("results", {}) or {}
+        existing_candidates: List[Dict] = results_data.get("candidates", []) or []
+        if not existing_candidates:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "No candidates available in search results"})
+            }
+
+        candidate_ids = event_data.get("candidateIds") or event_data.get("candidate_ids")
+        if candidate_ids and isinstance(candidate_ids, str):
+            candidate_ids = [candidate_ids]
+
+        candidate_map = {c.get("nodeId"): c for c in existing_candidates if c.get("nodeId")}
+        if candidate_ids:
+            selected_ids = [str(cid) for cid in candidate_ids if cid]
+        else:
+            selected_ids = list(candidate_map.keys())
+
+        selected_ids = [cid for cid in selected_ids if cid in candidate_map]
+        missing_candidate_ids = []
+        if candidate_ids:
+            requested = [str(cid) for cid in candidate_ids if cid]
+            missing_candidate_ids = [cid for cid in requested if cid not in candidate_map]
+            if missing_candidate_ids:
+                logger.warning(
+                    "The following candidateIds were not found in search results: %s",
+                    missing_candidate_ids
+                )
+
+        if not selected_ids:
+            logger.warning("No matching candidateIds provided - skipping processing")
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "message": "No matching candidates found for provided candidateIds",
+                    "processedCandidateIds": [],
+                    "missingCandidateIds": missing_candidate_ids
                 })
             }
 
-        # Handle reasoning if enabled
-        results = []
-        if reasoning_enabled:
-            if not nodes:
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps({
-                        'error': 'No nodes available for reasoning'
-                    })
-                }
+        hyde_analysis_full = search_doc.get("hydeAnalysis", {}) or {}
+        hyde_analysis_response = hyde_analysis_full.get("response", {}) or {}
+        hyde_details_for_rank = adapt_hyde_response_to_rank_details(hyde_analysis_response)
 
-            # Limit nodes for reasoning analysis to top_k_for_insights
-            reasoning_nodes = nodes[:top_k_for_insights] if len(nodes) > top_k_for_insights else nodes
+        batch_candidates = [candidate_map[cid] for cid in selected_ids]
+        materials = build_candidate_materials(batch_candidates, hyde_analysis_full)
+        transformed_map = materials.get("transformed_map", {})
 
-            logger.info(f"Processing reasoning for {len(reasoning_nodes)} nodes (top {top_k_for_insights}) with model: {model}")
+        ranking_results_map: Dict[str, Dict] = {}
+        if ranking_enabled:
+            rank_people = [transformed_map[cid] for cid in selected_ids if cid in transformed_map]
 
-            # Initialize SearchReasoning
-            search_reasoning = SearchReasoning(max_concurrent_calls=max_concurrent_calls)
+            if not rank_people:
+                logger.warning("No enriched candidates available for ranking in this batch")
+            else:
+                rank_batch_size_value = (
+                    event_data.get("rank_batch_size")
+                    or os.getenv("RANK_BATCH_SIZE")
+                    or 5
+                )
+                try:
+                    rank_batch_size = int(rank_batch_size_value)
+                except (TypeError, ValueError):
+                    rank_batch_size = 5
 
-            # Process the batch
-            results = await search_reasoning.batch_analyze_profiles(
-                reasoning_nodes,
-                query,
-                model,
-                hyde_analysis
-            )
+                ranked_results = await process_people_direct(
+                    rank_people,
+                    query,
+                    hyde_analysis_flags=hyde_details_for_rank,
+                    batch_size=rank_batch_size,
+                    max_concurrent_tasks=max_concurrent_calls,
+                    reasoning_model=model
+                )
+                for ranked in ranked_results:
+                    ranked_copy = convert_objectids_to_strings(ranked.copy())
+                    pid = ranked_copy.pop("nodeId", None)
+                    if not pid:
+                        continue
+                    ranking_results_map[pid] = ranked_copy
 
-            logger.info(f"Reasoning completed for {len(results)} nodes")
+            for cid in selected_ids:
+                candidate = candidate_map[cid]
+                payload = ranking_results_map.get(cid)
+                if payload:
+                    candidate["score"] = payload.get("recommendationScore", candidate.get("score"))
+                    for key, value in payload.items():
+                        if key == "recommendationScore":
+                            continue
+                        candidate[key] = value
+                else:
+                    candidate.pop("score", None)
         else:
-            logger.info("Reasoning disabled, skipping detailed analysis")
+            logger.info("Ranking disabled for this invocation; preserving existing scores")
 
-        # Calculate processing time and statistics
-        processing_time = (datetime.utcnow() - start_time).total_seconds()
-        successful = len([r for r in results if 'error' not in r])
-        failed = len([r for r in results if 'error' in r])
+        reasoning_results_map: Dict[str, Dict] = {}
+        reasoning_results: List[Dict] = []
+        if reasoning_enabled:
+            reasoning_nodes = [{"nodeId": cid} for cid in selected_ids]
+            if not reasoning_nodes:
+                logger.warning("No reasoning nodes available for batch")
+            else:
+                search_reasoning = SearchReasoning(max_concurrent_calls=max_concurrent_calls)
+                reasoning_results = await search_reasoning.batch_analyze_profiles(
+                    reasoning_nodes,
+                    query,
+                    model,
+                    hyde_analysis_response
+                )
+                for result in reasoning_results:
+                    node_id = result.get("nodeId")
+                    if node_id:
+                        reasoning_results_map[node_id] = result
 
-        logger.info(f"Processing completed. Successful: {successful}, Failed: {failed}, Time: {processing_time}s")
+            for cid in selected_ids:
+                candidate = candidate_map[cid]
+                result = reasoning_results_map.get(cid)
+                if not result:
+                    candidate["reasoning"] = {
+                        "summary": "",
+                        "highlights": [],
+                        "metadata": {},
+                        "reasoning_complete": False,
+                        "error": "Reasoning output missing"
+                    }
+                    continue
 
-        # OPTIMIZED: Progressive enhancement - add reasoning insights to existing candidates
-        if reasoning_enabled and search_id and results:
-            # Load current candidates list (which may already have ranking scores)
-            current_search_doc = searchOutputCollection.find_one({"_id": search_id})
-            current_candidates = current_search_doc.get("results", {}).get("candidates", [])
-            candidates_by_id = {c["personId"]: c for c in current_candidates}
-
-            # Add reasoning insights to candidates in-place
-            for result in results:
-                person_id = result.get("nodeId")
-                if person_id and person_id in candidates_by_id:
-                    candidates_by_id[person_id]["reasoning"] = {
+                if "error" in result:
+                    candidate["reasoning"] = {
+                        "summary": "",
+                        "highlights": [],
+                        "metadata": {},
+                        "reasoning_complete": False,
+                        "error": result.get("error")
+                    }
+                else:
+                    candidate["reasoning"] = {
                         "summary": result.get("summary", ""),
                         "highlights": result.get("highlights", []),
                         "metadata": result.get("metadata", {}),
-                        "reasoning_complete": True if 'error' not in result else False
+                        "reasoning_complete": True
                     }
-                    if 'error' in result:
-                        candidates_by_id[person_id]["reasoning"]["error"] = result["error"]
+        else:
+            logger.info("Reasoning disabled for this invocation")
 
-            # Update candidates array with reasoning data
-            updated_candidates = list(candidates_by_id.values())
-            searchOutputCollection.update_one(
-                {"_id": search_id},
-                {"$set": {"results.candidates": updated_candidates}}
-            )
+        def sort_key(candidate: Dict) -> tuple:
+            score = candidate.get("score")
+            similarity = candidate.get("similarity", 0)
+            if score is None:
+                return (float("-inf"), similarity)
+            return (score, similarity)
 
-        # Simplified reasoning results for metadata only (no longer storing full results separately)
-        reasoning_results = {
-            'metadata': {
-                'total_nodes': len(nodes),
-                'reasoning_nodes_processed': len(results) if results else 0,
-                'successful_count': successful,
-                'failed_count': failed,
-                'processing_time_seconds': processing_time,
-                'model_used': model,
-                'query': query,
-                'ranking_enabled': ranking_enabled,
-                'reasoning_enabled': reasoning_enabled,
-                'timestamp': get_utc_now()
+        sorted_candidates = sorted(existing_candidates, key=sort_key, reverse=True)
+
+        summary = results_data.get("summary", {}) or {}
+        summary.update({
+            "count": len(sorted_candidates),
+            "topK": len([c for c in sorted_candidates if c.get("score") is not None]),
+            "idsOnly": False
+        })
+
+        processing_time = (datetime.utcnow() - start_time).total_seconds()
+
+        existing_metadata = (search_doc.get("reasoning") or {}).get("metadata", {}) or {}
+        cumulative_processing_time = float(existing_metadata.get("processing_time_seconds", 0.0)) + processing_time
+
+        processed_reasoning = [
+            c for c in sorted_candidates
+            if isinstance(c.get("reasoning"), dict)
+        ]
+        successful_reasoning = [
+            c for c in processed_reasoning
+            if c["reasoning"].get("reasoning_complete") and not c["reasoning"].get("error")
+        ]
+        failed_reasoning = [
+            c for c in processed_reasoning
+            if c["reasoning"].get("reasoning_complete") is False or c["reasoning"].get("error")
+        ]
+
+        metadata = existing_metadata.copy()
+        metadata.update({
+            "total_nodes": len(sorted_candidates),
+            "reasoning_nodes_processed": len(processed_reasoning),
+            "successful_count": len(successful_reasoning),
+            "failed_count": len(failed_reasoning),
+            "processing_time_seconds": cumulative_processing_time,
+            "model_used": model,
+            "query": query,
+            "ranking_enabled": bool(ranking_enabled),
+            "reasoning_enabled": bool(reasoning_enabled),
+            "timestamp": get_utc_now()
+        })
+
+        batch_number = event_data.get("batchNumber") or event_data.get("batch_number")
+        total_batches = event_data.get("totalBatches") or event_data.get("total_batches")
+        if batch_number:
+            metadata["last_batch_number"] = batch_number
+        if total_batches:
+            metadata["batches_total"] = total_batches
+
+        is_final_batch = bool(event_data.get("isFinalBatch") or event_data.get("is_final_batch"))
+
+        now = datetime.utcnow()
+        stage_message_parts = [f"Processed {len(selected_ids)} candidates"]
+        if batch_number and total_batches:
+            stage_message_parts.append(f"batch {batch_number}/{total_batches}")
+        elif batch_number:
+            stage_message_parts.append(f"batch {batch_number}")
+        stage_message = ", ".join(stage_message_parts)
+
+        update_payload = {
+            "$set": {
+                "results.candidates": sorted_candidates,
+                "results.summary": summary,
+                "reasoning.metadata": metadata,
+                "updatedAt": now
+            },
+            "$unset": {
+                "results.ranked": ""
+            },
+            "$inc": {
+                "metrics.rankAndReasoningMs": processing_time * 1000
+            },
+            "$push": {
+                "events": {
+                    "stage": "RANK_AND_REASONING",
+                    "message": stage_message,
+                    "timestamp": now
+                }
             }
-            # NOTE: Full reasoning results now embedded in candidates array
         }
 
-        # If using searchId approach, update the search document
-        if search_id:
-            now = datetime.utcnow()
+        if is_final_batch:
+            update_payload["$set"]["status"] = SearchStatus.RANK_AND_REASONING_COMPLETE
 
-            # Determine final status and stage based on operations performed
-            if reasoning_enabled:
-                final_status = SearchStatus.RANK_AND_REASONING_COMPLETE
-                stage = "RANK_AND_REASONING"
-                stage_message = f"Ranking and reasoning completed, {successful} successful, {failed} failed"
-                metrics_key = "metrics.rankAndReasoningMs"
-            else:
-                # Only ranking was performed
-                final_status = SearchStatus.RANK_AND_REASONING_COMPLETE
-                stage = "RANKING"
-                stage_message = f"Ranking completed, {len(nodes)} results processed"
-                metrics_key = "metrics.rankingMs"
+        update_result = searchOutputCollection.update_one({"_id": search_id}, update_payload)
+        if update_result.matched_count == 0:
+            logger.error(f"Failed to update search document for searchId: {search_id}")
 
-            # OPTIMIZED: Only store reasoning metadata, not full results (those are now in candidates)
-            update_result = searchOutputCollection.update_one(
-                {"_id": search_id},
-                {
-                    "$set": {
-                        "reasoning.metadata": reasoning_results['metadata'],  # Only metadata
-                        "status": final_status,
-                        metrics_key: processing_time * 1000,
-                        "updatedAt": now
-                    },
-                    "$unset": {
-                        "reasoning.results": ""  # Remove full reasoning results array
-                    },
-                    "$push": {
-                        "events": {
-                            "stage": stage,
-                            "message": stage_message,
-                            "timestamp": now
-                        }
-                    }
-                }
-            )
-            
-            if update_result.matched_count == 0:
-                logger.error(f"Failed to update search document for searchId: {search_id}")
+        response_body = {
+            "metadata": metadata,
+            "processedCandidateIds": selected_ids,
+            "missingCandidateIds": missing_candidate_ids,
+            "rankingApplied": bool(ranking_enabled),
+            "reasoningApplied": bool(reasoning_enabled),
+            "processingTimeSeconds": processing_time
+        }
 
-            logger.info(f"Updated search document {search_id} with reasoning results")
+        if batch_number:
+            response_body["batchNumber"] = batch_number
+        if total_batches:
+            response_body["totalBatches"] = total_batches
+        response_body["isFinalBatch"] = is_final_batch
 
         return {
-            'statusCode': 200,
-            'body': json.dumps(reasoning_results)  # Fixed: now returns JSON string
+            "statusCode": 200,
+            "body": json.dumps(response_body)
         }
 
     except Exception as e:
@@ -540,11 +478,15 @@ def lambda_handler(event, context):
 
     Expected event format:
     {
-        "searchId": "uuid-string",           // required; loads candidates and hydeAnalysis from searchOutput collection
-        "ranking_enabled": true,             // optional, default true
-        "reasoning_enabled": false,          // optional, default false
-        "top_k_for_insights": 10,            // optional, default 10
-        "max_concurrent_calls": 5            // optional, default 5
+        "searchId": "uuid-string",            // required
+        "candidateIds": ["nodeId1", ...],   // optional; defaults to all candidates
+        "batchNumber": 1,                      // optional metadata for logging
+        "totalBatches": 12,                    // optional metadata for logging
+        "isFinalBatch": false,                 // optional; mark final batch to set completion status
+        "ranking_enabled": true,               // optional, default true
+        "reasoning_enabled": true,             // optional, default flags.reasoning
+        "max_concurrent_calls": 5,             // optional, default 5
+        "reasoning_model": "gemini"           // optional, overrides flags.reasoning_model
     }
     """
     try:
@@ -573,8 +515,8 @@ if __name__ == "__main__":
     test_event = {
         "searchId": os.getenv("TEST_SEARCH_ID", "test-search-id-123"),
         "ranking_enabled": True,
-        "reasoning_enabled": False,
-        "top_k_for_insights": 10
+        "reasoning_enabled": True,
+        "candidateIds": []
     }
     print("Testing searchId-based approach:")
     res = lambda_handler(test_event, None)

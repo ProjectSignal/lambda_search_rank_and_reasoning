@@ -66,7 +66,7 @@ def process_mutuals(mutual_ids):
 
     return [
         {
-            "personId": str(doc["_id"]),
+            "nodeId": str(doc["_id"]),
             "name": doc.get("name", ""),
             "avatarURL": doc.get("avatarURL", "")
         }
@@ -111,21 +111,19 @@ def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict
     hyde_requirements = analyze_hyde_data_requirements(hyde_result)
     additional_fields = hyde_requirements.get("additional_fields", [])
 
-    person_object_ids = []
-    person_id_lookup = {}
+    node_object_ids = []
     for cand in candidates:
-        pid = cand.get("personId")
+        pid = cand.get("nodeId")
         if not pid:
             continue
         try:
             oid = ObjectId(pid)
         except Exception:
-            logger.warning(f"Unable to convert personId {pid} to ObjectId for enrichment")
+            logger.warning(f"Unable to convert nodeId {pid} to ObjectId for enrichment")
             continue
-        person_object_ids.append(oid)
-        person_id_lookup[pid] = cand
+        node_object_ids.append(oid)
 
-    if not person_object_ids:
+    if not node_object_ids:
         return {
             "enriched_list": [],
             "enriched_map": {},
@@ -159,7 +157,7 @@ def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict
     mongo_docs = {
         str(doc["_id"]): doc
         for doc in nodes_collection.find(
-            {"_id": {"$in": person_object_ids}},
+            {"_id": {"$in": node_object_ids}},
             base_projection
         )
     }
@@ -170,7 +168,7 @@ def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict
     missing_ids: List[str] = []
 
     for candidate in candidates:
-        pid = candidate.get("personId")
+        pid = candidate.get("nodeId")
         if not pid:
             continue
 
@@ -207,7 +205,7 @@ def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict
         mutuals = process_mutuals(mutuals_raw)
 
         transformed_person = {
-            "personId": pid,
+            "nodeId": pid,
             "userId": candidate_copy.get("userId", ""),
             "name": doc_clean.get("name", ""),
             "aboutMe": doc_clean.get("about", ""),
@@ -226,7 +224,7 @@ def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict
 
         enriched_entry = {
             **candidate_copy,
-            "personId": pid,
+            "nodeId": pid,
             "type": "person",
             "name": doc_clean.get("name", ""),
             "stage": doc_clean.get("stage", ""),
@@ -314,24 +312,24 @@ class FingerprintMapper:
                 fingerprint = result_copy.get('id')
 
                 if fingerprint in self._reverse_map:
-                    person_id = self._reverse_map[fingerprint]
+                    node_id = self._reverse_map[fingerprint]
 
                     # Find original person data
                     original_person = next(
                         (p for p in original_data if p.get(
-                            'personId') == person_id),
+                            'nodeId') == node_id),
                         None
                     )
 
                     if original_person:
-                        result_copy['personId'] = person_id
+                        result_copy['nodeId'] = node_id
                         result_copy['userId'] = original_person.get(
                             'userId', '')
                         result_copy['name'] = original_person.get('name', '')
                         del result_copy['id']
                     else:
                         logger.warning(
-                            f"No original data found for {person_id}")
+                            f"No original data found for {node_id}")
                 else:
                     logger.warning(
                         f"No mapping found for fingerprint {fingerprint}")
@@ -369,8 +367,8 @@ async def convert_persons_to_xml(persons: List[Dict], fingerprint_mapper: Finger
     root = ET.Element("listOfPerson")
 
     for person in persons:
-        # Get fingerprint for person ID
-        original_id = person.get("personId", "")
+        # Get fingerprint derived from the candidate's node ID
+        original_id = person.get("nodeId", "")
         fingerprint = await fingerprint_mapper.get_fingerprint(original_id)
 
         # Create person wrapper with fingerprint ID
@@ -572,7 +570,7 @@ def convert_hyde_details_to_xml(details: Optional[Dict]) -> str:
 async def process_batch(persons: List[Dict], query: str,
                         fingerprint_mapper: FingerprintMapper, hyde_analysis_flags: dict = None, max_retries: int = 3, reasoning_model: str = "anthropic_haiku") -> List[Dict]:
     """Process a batch of persons and return their rankings."""
-    batch_id = str(hash(frozenset([p["personId"] for p in persons])))
+    batch_id = str(hash(frozenset([p["nodeId"] for p in persons])))
 
     try:
         logger.info(
