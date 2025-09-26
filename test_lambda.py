@@ -7,7 +7,7 @@ import json
 from dotenv import load_dotenv
 from logging_config import setup_logger
 from lambda_handler import lambda_handler
-from db import searchOutputCollection
+from api_client import get_search_document
 
 load_dotenv()
 logger = setup_logger(__name__)
@@ -68,7 +68,7 @@ def main():
     print(json.dumps(body, indent=2, default=str))
 
     # Validate DB updates
-    doc = searchOutputCollection.find_one({"_id": search_id})
+    doc = get_search_document(search_id)
     if not doc:
         print(f"[ERROR] Search document not found: {search_id}")
         raise SystemExit(1)

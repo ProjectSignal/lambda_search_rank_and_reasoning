@@ -2,12 +2,17 @@ import json
 import asyncio
 import os
 import traceback
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Dict, List
 from dotenv import load_dotenv
 from reasoning_logic import SearchReasoning
 from logging_config import setup_logger
-from db import searchOutputCollection
+from api_client import (
+    get_search_document,
+    update_search_document,
+    SearchServiceError,
+)
 from ranking import build_candidate_materials, process_people_direct, convert_objectids_to_strings
 
 # Load environment variables (for local testing)
@@ -138,7 +143,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
 
         logger.info(f"Processing rank & reasoning for searchId={search_id}")
 
-        search_doc = searchOutputCollection.find_one({"_id": search_id})
+        search_doc = get_search_document(search_id)
         if not search_doc:
             return {
                 "statusCode": 404,
@@ -372,7 +377,17 @@ async def process_reasoning_request(event_data: dict) -> dict:
         if total_batches:
             metadata["batches_total"] = total_batches
 
-        is_final_batch = bool(event_data.get("isFinalBatch") or event_data.get("is_final_batch"))
+        raw_is_final_batch = event_data.get("isFinalBatch")
+        if raw_is_final_batch is None:
+            raw_is_final_batch = event_data.get("is_final_batch")
+
+        if raw_is_final_batch is None and batch_number is not None and total_batches is not None:
+            try:
+                is_final_batch = int(batch_number) == int(total_batches)
+            except (TypeError, ValueError):
+                is_final_batch = False
+        else:
+            is_final_batch = bool(raw_is_final_batch)
 
         now = datetime.utcnow()
         stage_message_parts = [f"Processed {len(selected_ids)} candidates"]
@@ -382,34 +397,43 @@ async def process_reasoning_request(event_data: dict) -> dict:
             stage_message_parts.append(f"batch {batch_number}")
         stage_message = ", ".join(stage_message_parts)
 
-        update_payload = {
-            "$set": {
-                "results.candidates": sorted_candidates,
-                "results.summary": summary,
-                "reasoning.metadata": metadata,
-                "updatedAt": now
-            },
-            "$unset": {
-                "results.ranked": ""
-            },
-            "$inc": {
-                "metrics.rankAndReasoningMs": processing_time * 1000
-            },
-            "$push": {
-                "events": {
-                    "stage": "RANK_AND_REASONING",
-                    "message": stage_message,
-                    "timestamp": now
-                }
-            }
+        existing_results = deepcopy(search_doc.get("results") or {})
+        existing_results["candidates"] = sorted_candidates
+        existing_results["summary"] = summary
+        existing_results.pop("ranked", None)
+
+        existing_reasoning = deepcopy(search_doc.get("reasoning") or {})
+        existing_reasoning["metadata"] = metadata
+
+        existing_metrics = deepcopy(search_doc.get("metrics") or {})
+        current_ms = existing_metrics.get("rankAndReasoningMs", 0) or 0
+        existing_metrics["rankAndReasoningMs"] = current_ms + processing_time * 1000
+
+        set_fields = {
+            "results": existing_results,
+            "reasoning": existing_reasoning,
+            "metrics": existing_metrics,
+            "updatedAt": now
         }
-
         if is_final_batch:
-            update_payload["$set"]["status"] = SearchStatus.RANK_AND_REASONING_COMPLETE
+            set_fields["status"] = SearchStatus.RANK_AND_REASONING_COMPLETE
 
-        update_result = searchOutputCollection.update_one({"_id": search_id}, update_payload)
-        if update_result.matched_count == 0:
-            logger.error(f"Failed to update search document for searchId: {search_id}")
+        try:
+            update_search_document(
+                search_id,
+                set_fields=set_fields,
+                append_events=[
+                    {
+                        "stage": "RANK_AND_REASONING",
+                        "message": stage_message,
+                        "timestamp": now
+                    }
+                ],
+                expected_statuses=[SearchStatus.SEARCH_COMPLETE, SearchStatus.RANK_AND_REASONING_COMPLETE],
+            )
+        except SearchServiceError as update_error:
+            logger.error("Failed to update search document %s: %s", search_id, update_error)
+            raise
 
         response_body = {
             "metadata": metadata,
@@ -439,29 +463,27 @@ async def process_reasoning_request(event_data: dict) -> dict:
         if search_id:
             try:
                 now = datetime.utcnow()
-                searchOutputCollection.update_one(
-                    {"_id": search_id},
-                    {
-                        "$set": {
-                            "status": SearchStatus.ERROR,
-                            "error": {
-                                "stage": "RANK_AND_REASONING",
-                                "message": str(e),
-                                "stackTrace": traceback.format_exc(),
-                                "occurredAt": now
-                            },
-                            "updatedAt": now
+                update_search_document(
+                    search_id,
+                    set_fields={
+                        "status": SearchStatus.ERROR,
+                        "error": {
+                            "stage": "RANK_AND_REASONING",
+                            "message": str(e),
+                            "stackTrace": traceback.format_exc(),
+                            "occurredAt": now
                         },
-                        "$push": {
-                            "events": {
-                                "stage": "RANK_AND_REASONING",
-                                "message": f"Error: {str(e)}",
-                                "timestamp": now
-                            }
+                        "updatedAt": now
+                    },
+                    append_events=[
+                        {
+                            "stage": "RANK_AND_REASONING",
+                            "message": f"Error: {str(e)}",
+                            "timestamp": now
                         }
-                    }
+                    ],
                 )
-            except Exception as db_error:
+            except SearchServiceError as db_error:
                 logger.error(f"Failed to update error state: {db_error}")
         
         return {

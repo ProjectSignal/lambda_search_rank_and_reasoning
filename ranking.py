@@ -12,7 +12,7 @@ import math
 import os
 from bson.objectid import ObjectId
 
-from db import nodes_collection
+from api_client import fetch_nodes_by_ids, SearchServiceError
 from llm_helper import LLMManager
 from model_config import MODEL_CONFIGS
 import traceback
@@ -57,21 +57,30 @@ def process_mutuals(mutual_ids):
     if not object_ids:
         return []
 
-    mutual_docs = list(
-        nodes_collection.find(
-            {"_id": {"$in": object_ids}},
-            {"_id": 1, "name": 1, "avatarURL": 1}
+    try:
+        mutual_map = fetch_nodes_by_ids(
+            [str(oid) for oid in object_ids],
+            projection={"_id": 1, "name": 1, "avatarURL": 1}
         )
-    )
+    except SearchServiceError as exc:
+        logger.error("Failed to fetch mutual connections via API: %s", exc)
+        return []
 
-    return [
-        {
-            "nodeId": str(doc["_id"]),
-            "name": doc.get("name", ""),
-            "avatarURL": doc.get("avatarURL", "")
-        }
-        for doc in mutual_docs
-    ]
+    results = []
+    for oid in object_ids:
+        key = str(oid)
+        doc = mutual_map.get(key)
+        if not doc:
+            continue
+        normalized_id = str(doc.get("_id") or doc.get("nodeId") or key)
+        results.append(
+            {
+                "nodeId": normalized_id,
+                "name": doc.get("name", ""),
+                "avatarURL": doc.get("avatarURL", "")
+            }
+        )
+    return results
 
 
 def analyze_hyde_data_requirements(hyde_result: dict) -> dict:
@@ -111,19 +120,14 @@ def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict
     hyde_requirements = analyze_hyde_data_requirements(hyde_result)
     additional_fields = hyde_requirements.get("additional_fields", [])
 
-    node_object_ids = []
+    node_ids: List[str] = []
     for cand in candidates:
         pid = cand.get("nodeId")
         if not pid:
             continue
-        try:
-            oid = ObjectId(pid)
-        except Exception:
-            logger.warning(f"Unable to convert nodeId {pid} to ObjectId for enrichment")
-            continue
-        node_object_ids.append(oid)
+        node_ids.append(str(pid))
 
-    if not node_object_ids:
+    if not node_ids:
         return {
             "enriched_list": [],
             "enriched_map": {},
@@ -154,13 +158,17 @@ def build_candidate_materials(candidates: List[Dict], hyde_result: dict) -> Dict
     for field in additional_fields:
         base_projection[field] = 1
 
-    mongo_docs = {
-        str(doc["_id"]): doc
-        for doc in nodes_collection.find(
-            {"_id": {"$in": node_object_ids}},
-            base_projection
-        )
-    }
+    try:
+        fetched_docs = fetch_nodes_by_ids(node_ids, projection=base_projection)
+    except SearchServiceError as exc:
+        logger.error("Failed to fetch candidate materials via API: %s", exc)
+        fetched_docs = {}
+
+    mongo_docs = {}
+    for key, doc in fetched_docs.items():
+        normalized_id = str(doc.get("_id") or doc.get("nodeId") or key)
+        doc["_id"] = normalized_id
+        mongo_docs[normalized_id] = doc
 
     enriched_list: List[Dict] = []
     enriched_map: Dict[str, Dict] = {}

@@ -1,7 +1,7 @@
 # right side bar insights v15
 import traceback
 from datetime import datetime
-from db import nodes_collection
+from api_client import get_node_document, SearchServiceError
 from ranking import convert_hyde_details_to_xml
 from jsonToXml import json_to_xml
 from prompts.sidebar_reasoning import message as search_reasoning_prompt, prefill, stop_sequences
@@ -9,7 +9,6 @@ from llm_helper import LLMManager
 from logging_config import setup_logger
 
 logger = setup_logger(__name__)
-from bson.objectid import ObjectId
 from typing import Dict, Any, List
 import xml.etree.ElementTree as ET
 import re
@@ -266,14 +265,18 @@ class SearchReasoning:
                     logger.error("Missing nodeId in node data")
                     return {'error': 'Missing nodeId'}
 
-                # Fetch node data from MongoDB
-                node_data = nodes_collection.find_one(
-                    {"_id": ObjectId(node_id)})
+                # Fetch node data from API
+                try:
+                    node_data = get_node_document(node_id)
+                except SearchServiceError as exc:
+                    logger.error("Node fetch failed for %s: %s", node_id, exc)
+                    node_data = None
+
                 if not node_data:
-                    logger.warning(f"Node not found in database: {node_id}")
+                    logger.warning(f"Node not found in data service: {node_id}")
                     return {
                         'nodeId': node_id,
-                        'error': 'Node not found in database'
+                        'error': 'Node not found in data service'
                     }
 
                 # Convert node data to XML
