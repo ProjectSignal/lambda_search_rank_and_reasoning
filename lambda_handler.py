@@ -30,7 +30,7 @@ class SearchStatus:
 
 def get_utc_now():
     """Returns current UTC datetime in ISO format"""
-    return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 async def process_reasoning_request(event_data: dict) -> dict:
 
@@ -131,7 +131,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
 
         return details
 
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     search_id = event_data.get("searchId") or event_data.get("search_id") or event_data.get("search_output_id")
 
     try:
@@ -143,6 +143,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
 
         logger.info(f"Processing rank & reasoning for searchId={search_id}")
 
+        # First get the document without userId to extract it
         search_doc = get_search_document(search_id)
         if not search_doc:
             return {
@@ -338,7 +339,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
             "idsOnly": False
         })
 
-        processing_time = (datetime.utcnow() - start_time).total_seconds()
+        processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
 
         existing_metadata = (search_doc.get("reasoning") or {}).get("metadata", {}) or {}
         cumulative_processing_time = float(existing_metadata.get("processing_time_seconds", 0.0)) + processing_time
@@ -389,7 +390,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
         else:
             is_final_batch = bool(raw_is_final_batch)
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         stage_message_parts = [f"Processed {len(selected_ids)} candidates"]
         if batch_number and total_batches:
             stage_message_parts.append(f"batch {batch_number}/{total_batches}")
@@ -413,7 +414,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
             "results": existing_results,
             "reasoning": existing_reasoning,
             "metrics": existing_metrics,
-            "updatedAt": now
+            "updatedAt": now.isoformat()
         }
         if is_final_batch:
             set_fields["status"] = SearchStatus.RANK_AND_REASONING_COMPLETE
@@ -426,7 +427,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
                     {
                         "stage": "RANK_AND_REASONING",
                         "message": stage_message,
-                        "timestamp": now
+                        "timestamp": now.isoformat()
                     }
                 ],
                 expected_statuses=[SearchStatus.SEARCH_COMPLETE, SearchStatus.RANK_AND_REASONING_COMPLETE],
@@ -462,7 +463,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
         # Update search document with error state if we have searchId
         if search_id:
             try:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 update_search_document(
                     search_id,
                     set_fields={
@@ -471,15 +472,15 @@ async def process_reasoning_request(event_data: dict) -> dict:
                             "stage": "RANK_AND_REASONING",
                             "message": str(e),
                             "stackTrace": traceback.format_exc(),
-                            "occurredAt": now
+                            "occurredAt": now.isoformat()
                         },
-                        "updatedAt": now
+                        "updatedAt": now.isoformat()
                     },
                     append_events=[
                         {
                             "stage": "RANK_AND_REASONING",
                             "message": f"Error: {str(e)}",
-                            "timestamp": now
+                            "timestamp": now.isoformat()
                         }
                     ],
                 )
