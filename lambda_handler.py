@@ -464,6 +464,9 @@ async def process_reasoning_request(event_data: dict) -> dict:
             response_body["totalBatches"] = total_batches
         response_body["isFinalBatch"] = is_final_batch
 
+        # Small delay to let any background HTTP clients cleanup naturally
+        await asyncio.sleep(0.1)
+
         return {
             "statusCode": 200,
             "body": json.dumps(response_body)
@@ -500,7 +503,10 @@ async def process_reasoning_request(event_data: dict) -> dict:
                 )
             except SearchServiceError as db_error:
                 logger.error(f"Failed to update error state: {db_error}")
-        
+
+        # Small delay to let any background HTTP clients cleanup naturally
+        await asyncio.sleep(0.1)
+
         return {
             'statusCode': 500,
             'body': json.dumps({
