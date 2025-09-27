@@ -133,6 +133,13 @@ async def process_reasoning_request(event_data: dict) -> dict:
 
     start_time = datetime.now(timezone.utc)
     search_id = event_data.get("searchId") or event_data.get("search_id") or event_data.get("search_output_id")
+    user_id_raw = event_data.get("userId") or event_data.get("user_id")
+    if isinstance(user_id_raw, dict) and "$oid" in user_id_raw:
+        user_id = str(user_id_raw["$oid"])
+    elif user_id_raw is not None:
+        user_id = str(user_id_raw).strip()
+    else:
+        user_id = None
 
     try:
         if not search_id:
@@ -141,10 +148,15 @@ async def process_reasoning_request(event_data: dict) -> dict:
                 "body": json.dumps({"error": "Missing searchId in request"})
             }
 
+        if not user_id:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Missing userId in request"})
+            }
+
         logger.info(f"Processing rank & reasoning for searchId={search_id}")
 
-        # First get the document without userId to extract it
-        search_doc = get_search_document(search_id)
+        search_doc = get_search_document(search_id, user_id=user_id)
         if not search_doc:
             return {
                 "statusCode": 404,
@@ -422,6 +434,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
         try:
             update_search_document(
                 search_id,
+                user_id=user_id,
                 set_fields=set_fields,
                 append_events=[
                     {
@@ -461,11 +474,12 @@ async def process_reasoning_request(event_data: dict) -> dict:
         logger.error(traceback.format_exc())
         
         # Update search document with error state if we have searchId
-        if search_id:
+        if search_id and user_id:
             try:
                 now = datetime.now(timezone.utc)
                 update_search_document(
                     search_id,
+                    user_id=user_id,
                     set_fields={
                         "status": SearchStatus.ERROR,
                         "error": {

@@ -9,6 +9,8 @@ from logging_config import setup_logger
 from lambda_handler import lambda_handler
 from api_client import get_search_document
 
+DEFAULT_USER_ID = "6797bf304791caa516f6da9e"
+
 load_dotenv()
 logger = setup_logger(__name__)
 
@@ -31,11 +33,18 @@ def main():
         default=5,
         help="Override max concurrent calls to downstream models"
     )
+    parser.add_argument(
+        "--user-id",
+        type=str,
+        default=DEFAULT_USER_ID,
+        help="UserId associated with the search document"
+    )
     parser.set_defaults(ranking=True, reasoning=False)
     args = parser.parse_args()
 
     search_id = args.search_id
     candidate_ids = [cid.strip() for cid in args.candidate_ids.split(",") if cid.strip()]
+    user_id = args.user_id
     candidate_filter = set(candidate_ids) if candidate_ids else None
 
     print("🚀 Starting RankAndReasoning Lambda Test")
@@ -46,6 +55,7 @@ def main():
 
     event = {
         "searchId": search_id,
+        "userId": user_id,
         "ranking_enabled": args.ranking,
         "reasoning_enabled": args.reasoning,
         "max_concurrent_calls": args.max_concurrent_calls
@@ -68,7 +78,7 @@ def main():
     print(json.dumps(body, indent=2, default=str))
 
     # Validate DB updates
-    doc = get_search_document(search_id)
+    doc = get_search_document(search_id, user_id=user_id)
     if not doc:
         print(f"[ERROR] Search document not found: {search_id}")
         raise SystemExit(1)
