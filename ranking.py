@@ -10,7 +10,6 @@ import time
 from datetime import datetime
 import math
 import os
-from bson.objectid import ObjectId
 
 from api_client import fetch_nodes_by_ids, SearchServiceError
 from llm_helper import LLMManager
@@ -24,13 +23,8 @@ logger = setup_logger(__name__)
 
 
 def convert_objectids_to_strings(obj):
-    """Recursively convert any ObjectId instances into strings."""
-    if isinstance(obj, ObjectId):
-        return str(obj)
-    if isinstance(obj, dict):
-        return {key: convert_objectids_to_strings(value) for key, value in obj.items()}
-    if isinstance(obj, list):
-        return [convert_objectids_to_strings(item) for item in obj]
+    """Pass-through function for API-based approach.
+    Data is already in serializable format from backend API."""
     return obj
 
 
@@ -39,27 +33,21 @@ def process_mutuals(mutual_ids):
     if not mutual_ids:
         return []
 
-    object_ids = []
+    node_ids = []
     for mid in mutual_ids:
-        if isinstance(mid, ObjectId):
-            object_ids.append(mid)
-        elif isinstance(mid, dict) and "$oid" in mid:
-            try:
-                object_ids.append(ObjectId(mid["$oid"]))
-            except Exception:
-                continue
+        if isinstance(mid, dict) and "$oid" in mid:
+            # Handle Extended JSON format
+            node_ids.append(str(mid["$oid"]))
         elif mid:
-            try:
-                object_ids.append(ObjectId(str(mid)))
-            except Exception:
-                continue
+            # Convert to string
+            node_ids.append(str(mid))
 
-    if not object_ids:
+    if not node_ids:
         return []
 
     try:
         mutual_map = fetch_nodes_by_ids(
-            [str(oid) for oid in object_ids],
+            node_ids,
             projection={"_id": 1, "name": 1, "avatarURL": 1}
         )
     except SearchServiceError as exc:
@@ -67,12 +55,11 @@ def process_mutuals(mutual_ids):
         return []
 
     results = []
-    for oid in object_ids:
-        key = str(oid)
-        doc = mutual_map.get(key)
+    for node_id in node_ids:
+        doc = mutual_map.get(node_id)
         if not doc:
             continue
-        normalized_id = str(doc.get("_id") or doc.get("nodeId") or key)
+        normalized_id = str(doc.get("_id") or doc.get("nodeId") or node_id)
         results.append(
             {
                 "nodeId": normalized_id,
