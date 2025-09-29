@@ -20,6 +20,31 @@ load_dotenv()
 
 logger = setup_logger(__name__)
 
+# Global event loop for Lambda container reuse - optimized for concurrency
+_event_loop = None
+
+def get_or_create_event_loop():
+    """Get or create a persistent event loop for Lambda container reuse."""
+    global _event_loop
+
+    # If we have an existing loop and it's not closed, use it
+    if _event_loop is not None and not _event_loop.is_closed():
+        return _event_loop
+
+    # Create a new event loop
+    _event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_event_loop)
+
+    # Apply nest_asyncio to allow nested event loops if needed
+    try:
+        import nest_asyncio
+        nest_asyncio.apply()
+    except ImportError:
+        # nest_asyncio not available, continue without it
+        pass
+
+    return _event_loop
+
 class SearchStatus:
     """Search execution status tracking"""
     NEW = "NEW"
@@ -475,7 +500,7 @@ async def process_reasoning_request(event_data: dict) -> dict:
     except Exception as e:
         logger.error(f"Error processing reasoning request: {str(e)}")
         logger.error(traceback.format_exc())
-        
+
         # Update search document with error state if we have searchId
         if search_id and user_id:
             try:
@@ -535,8 +560,12 @@ def lambda_handler(event, context):
     try:
         logger.info(f"Received reasoning request: {json.dumps(event, default=str)}")
 
-        # Run the async processing
-        result = asyncio.run(process_reasoning_request(event))
+        # Get or create the event loop for this Lambda container
+        loop = get_or_create_event_loop()
+
+        # Run the async processing using the persistent event loop
+        # Use run_until_complete instead of asyncio.run to avoid creating a new loop
+        result = loop.run_until_complete(process_reasoning_request(event))
 
         logger.info(f"Reasoning request completed with status: {result['statusCode']}")
         return result

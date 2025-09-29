@@ -9,3 +9,4 @@ upstash-vector
 redis
 boto3
 aiofiles
+nest-asyncio
